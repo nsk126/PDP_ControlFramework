@@ -30,7 +30,7 @@ class Simple_Pendullum:
             self.params += [self.damping]
             
         # Turn into casadi format
-        self.params  = ca.vcat(self.params)
+        self.dyn_auxvar  = ca.vcat(self.params)
             
         # ensure float input
         self.m = float(self.m)
