@@ -1,93 +1,141 @@
-import casadi as ca
-from casadi import SX
-import numpy as np
+from casadi import *
+import math
+from matplotlib import pyplot as plt
+import matplotlib.animation as animation
 
-class Simple_Pendullum:
-    def __init__(self, mass=None, length=None, damping_ratio=None):
-        """
-        Purpose: set params
-        """
-        self.g = 9.81 # gravity
-        self.m = mass
-        self.l = length
-        self.damping = damping_ratio
-        self.params = []
-        self.cost_auxvar = []
-        
-    def defineDyn(self):
-        
-        # check if sys params are set to None. TODO: remove
-        if self.m == None:
-            self.m = SX.sym('m')
-            self.params += [self.m]
-            
-        if self.l == None:
+# inverted pendulum
+class InvPendulum:
+    def __init__(self, project_name='single pendlumn system'):
+        self.project_name = project_name
+
+    def initDyn(self, l=None, m=None, damping_ratio=None):
+        # set parameter
+        g = 10
+
+        # declare system parameter
+        parameter = []
+        if l is None:
             self.l = SX.sym('l')
-            self.params += [self.l]
-            
-        if self.damping == None:
-            self.damping = SX.sym('damping_ratio')
-            self.params += [self.damping]
-            
-        # Turn into casadi format
-        self.dyn_auxvar  = ca.vcat(self.params)
-            
-        # ensure float input
-        self.m = float(self.m)
-        self.l = float(self.l)
-        self.damping = float(self.damping)
-            
-        # Sys dynamics
-        theta = SX.sym('theta')
-        theta_d = SX.sym('theta_d')
-        
-        # Set control input
-        self.u = SX.sym('u')
-        
-        l = self.m * (self.l ** 2) / 3.0 # var to shorten below eq
-        self.state = ca.vertcat(theta_d, (self.u - self.m * self.g * self.l * np.sin(theta) - self.damping * theta_d) / l)
-        
-        
-    def define_cost_fn(self, stage_cost=None, terminal_cost=None, desired_state=None):
+            parameter += [self.l]
+        else:
+            self.l = l
 
-        # TODO: err check all inputs
-     
-        if desired_state == None:
-            desired_state = np.array([np.pi, 0.0]).reshape(-1,1) # make State X in column format
-            
-        cost_q = self.state[0] - desired_state[0]  # angle
-        cost_dq = self.state[1] - desired_state[1]  # angular velocity
-        
-        self.cost_q = cost_q ** 2
-        self.cost_dq = cost_dq ** 2
-        
-        self.cost_u = ca.dot(self.u, self.u)
-        
-        if stage_cost == None:
-            wq = SX.sym('wq')
-            wq_d = SX.sym('wq_d')
-            self.cost_auxvar += [wq]
-            self.cost_auxvar += [wq_d]
+        if m is None:
+            self.m = SX.sym('m')
+            parameter += [self.m]
         else:
-            wq = stage_cost[0]
-            wq_d = stage_cost[1]
-            
-        if terminal_cost == None:
-            wu = SX.sym('wu')
-            self.cost_auxvar += [wu]
+            self.m = m
+
+        if damping_ratio is None:
+            self.damping_ratio = SX.sym('damping_ratio')
+            parameter += [self.damping_ratio]
         else:
-            wu = terminal_cost
-            
-        # convert to casadi format
-        self.cost_auxvar = ca.vcat(self.cost_auxvar)
-        
-        # define state costs
-        self.stage_cost =   wq * self.cost_q + wq_d * self.cost_dq + wu * self.cost_u
-        self.terminal_cost = wq * self.cost_q + wq_d * self.cost_dq
-        
-        
-    def pendullum_pos(self):
-        
-        #
-        
-        pass
+            self.damping_ratio = damping_ratio
+
+        self.dyn_auxvar = vcat(parameter)
+
+        # set variable
+        self.q, self.dq = SX.sym('q'), SX.sym('dq')
+        self.X = vertcat(self.q, self.dq)
+        U = SX.sym('u')
+        self.U = U
+        I = 1 / 3 * self.m * self.l * self.l
+        self.f = vertcat(self.dq,
+                         (self.U - self.m * g * self.l * sin(
+                             self.q) - self.damping_ratio * self.dq) / I)  # continuous state-space representation
+
+    def initCost(self, wq=None, wdq=None, wu=0.001):
+        parameter = []
+        if wq is None:
+            self.wq = SX.sym('wq')
+            parameter += [self.wq]
+        else:
+            self.wq = wq
+
+        if wdq is None:
+            self.wdq = SX.sym('wdq')
+            parameter += [self.wdq]
+        else:
+            self.wdq = wdq
+
+        self.cost_auxvar = vcat(parameter)
+
+        # control goal
+        x_goal = [math.pi, 0, 0, 0]
+
+        # cost for q
+        self.cost_q = (self.q - x_goal[0]) ** 2
+        # cost for dq
+        self.cost_dq = (self.dq - x_goal[1]) ** 2
+        # cost for u
+        self.cost_u = dot(self.U, self.U)
+
+        self.path_cost = self.wq * self.cost_q + self.wdq * self.cost_dq + wu * self.cost_u
+        self.final_cost = self.wq * self.cost_q + self.wdq * self.cost_dq
+
+    def get_pendulum_position(self, len, state_traj):
+
+        position = np.zeros((state_traj.shape[0], 2))
+        for t in range(state_traj.shape[0]):
+            q = state_traj[t, 0]
+            pos_x = len * sin(q)
+            pos_y = -len * cos(q)
+            position[t, :] = np.array([pos_x, pos_y])
+        return position
+
+    def play_animation(self, len, dt, state_traj, state_traj_ref=None, save_option=0):
+
+        # get the position of cart pole
+        position = self.get_pendulum_position(len, state_traj)
+        horizon = position.shape[0]
+        if state_traj_ref is not None:
+            position_ref = self.get_pendulum_position(len, state_traj_ref)
+        else:
+            position_ref = np.zeros_like(position)
+        assert position.shape[0] == position_ref.shape[0], 'reference trajectory should have the same length'
+
+        # set figure
+        fig = plt.figure()
+        ax = fig.add_subplot(111, autoscale_on=False, xlim=(-4, 4), ylim=(-4, 4), )
+        ax.set_aspect('equal')
+        ax.grid()
+        ax.set_ylabel('Vertical (m)')
+        ax.set_xlabel('Horizontal (m)')
+        ax.set_title('Pendulum system')
+        time_template = 'time = %.1fs'
+        time_text = ax.text(0.05, 0.9, '', transform=ax.transAxes)
+
+        # set lines
+        cart_h, cart_w = 0.5, 1
+        line, = ax.plot([], [], 'o-', lw=2)
+        line_ref, = ax.plot([], [], color='lightgray', marker='o', lw=1)
+
+        def init():
+            line.set_data([], [])
+            line_ref.set_data([], [])
+            time_text.set_text('')
+            return line, line_ref, time_text
+
+        def animate(i):
+            seg_x = [0, position[i, 0]]
+            seg_y = [0, position[i, 1]]
+            line.set_data(seg_x, seg_y)
+
+            seg_x_ref = [0, position_ref[i, 0]]
+            seg_y_ref = [0, position_ref[i, 1]]
+            line_ref.set_data(seg_x_ref, seg_y_ref)
+
+            time_text.set_text(time_template % (i * dt))
+
+            return line, line_ref, time_text
+
+        ani = animation.FuncAnimation(fig, animate, np.size(state_traj, 0),
+                                      interval=50, init_func=init)
+
+        if save_option != 0:
+            Writer = animation.writers['ffmpeg']
+            writer = Writer(fps=10, metadata=dict(artist='Me'), bitrate=-1)
+            ani.save('Pendulum.mp4', writer=writer)
+            print('save_success')
+
+        plt.show()
