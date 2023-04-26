@@ -12,7 +12,7 @@ pip install -r requiments.txt
 ## Steps to run Pendulum model using PDP
 
 ```bash
-python src/main.py -l <demos_file>
+python src/main.py -l data\pendulum_demos.mat
 ```
 
 If no demo file is given, then demos are generated in the begining. _E.g:_ `python src/main.py`
