@@ -118,7 +118,7 @@ def run_PDP(args):
                     'parameter_trace': parameter_trace,
                     'learning_rate': lr,
                     'time_passed': time.time() - start_time}
-        sio.savemat('PDP_results_trial_' + str(j) + '.mat', {'results': save_data})
+        sio.savemat('results/PDP_results_trial_' + str(j) + '.mat', {'results': save_data})
 
 
 def gen_demos(pendulum):
