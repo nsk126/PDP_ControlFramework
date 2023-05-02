@@ -1,4 +1,6 @@
 numpy
 casadi
+scipy
 matplotlib
 argparse
+ffmpeg-python

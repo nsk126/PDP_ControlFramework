@@ -1,290 +1,194 @@
+# @article{jin2019pontryagin,
+#   title={Pontryagin Differentiable Programming: An End-to-End Learning and Control Framework},
+#   author={Jin, Wanxin and Wang, Zhaoran and Yang, Zhuoran and Mou, Shaoshuai},
+#   journal={arXiv preprint arXiv:1912.12970},
+#   year={2019}
+# }
+
 from casadi import *
 import numpy
 from scipy import interpolate
-import casadi
 
-class OCSys:
+# initializing primal optimization program
+class POP:
 
-    def __init__(self, project_name="my optimal control system"):
-        self.project_name = project_name
-
-    def setAuxvarVariable(self, auxvar=None):
-        if auxvar is None or auxvar.numel() == 0:
-            self.auxvar = SX.sym('auxvar')
-        else:
-            self.auxvar = auxvar
-        self.n_auxvar = self.auxvar.numel()
-
-    def setStateVariable(self, state, state_lb=[], state_ub=[]):
+    def __init__(self, weights=None, state = None, state_lb=[], state_ub=[], control = None, control_lb=[], control_ub=[], ode = None,
+                 stage_cost = None, terminal_cost = None):
+        self.weights = weights
+        self.n_weights = self.weights.numel()
         self.state = state
         self.n_state = self.state.numel()
-        if len(state_lb) == self.n_state:
-            self.state_lb = state_lb
-        else:
-            self.state_lb = self.n_state * [-1e20]
-
-        if len(state_ub) == self.n_state:
-            self.state_ub = state_ub
-        else:
-            self.state_ub = self.n_state * [1e20]
-
-    def setControlVariable(self, control, control_lb=[], control_ub=[]):
+        self.state_lb = self.n_state * [-1e20]
+        self.state_ub = self.n_state * [1e20]
         self.control = control
         self.n_control = self.control.numel()
-
-        if len(control_lb) == self.n_control:
-            self.control_lb = control_lb
-        else:
-            self.control_lb = self.n_control * [-1e20]
-
-        if len(control_ub) == self.n_control:
-            self.control_ub = control_ub
-        else:
-            self.control_ub = self.n_control * [1e20]
-
-    def setDyn(self, ode):
-        if not hasattr(self, 'auxvar'):
-            self.setAuxvarVariable()
-
+        self.control_lb = self.n_control * [-1e20]
+        self.control_ub = self.n_control * [1e20]
         self.dyn = ode
-        self.dyn_fn = casadi.Function(
-            'dynamics', [self.state, self.control, self.auxvar], [self.dyn])
+        self.dyn_fn = casadi.Function('dynamics', [self.state, self.control, self.weights], [self.dyn])
+        self.stage_cost = stage_cost
+        self.stage_cost_fn = casadi.Function('stage_cost', [self.state, self.control, self.weights], [self.stage_cost])
+        self.terminal_cost = terminal_cost
+        self.terminal_cost_fn = casadi.Function('terminal_cost', [self.state, self.weights], [self.terminal_cost])
 
-    def setPathCost(self, path_cost):
-        if not hasattr(self, 'auxvar'):
-            self.setAuxvarVariable()
+    def popSolver(self, initial_state, horizon, weights_value=1, print_level=0):
 
-        assert path_cost.numel() == 1, "path_cost must be a scalar function"
-
-        self.path_cost = path_cost
-        self.path_cost_fn = casadi.Function(
-            'path_cost', [self.state, self.control, self.auxvar], [self.path_cost])
-
-    def setFinalCost(self, final_cost):
-        if not hasattr(self, 'auxvar'):
-            self.setAuxvarVariable()
-
-        assert final_cost.numel() == 1, "final_cost must be a scalar function"
-
-        self.final_cost = final_cost
-        self.final_cost_fn = casadi.Function(
-            'final_cost', [self.state, self.auxvar], [self.final_cost])
-
-    def ocSolver(self, ini_state, horizon, auxvar_value=1, print_level=0, costate_option=0):
-        assert hasattr(self, 'state'), "Define the state variable first!"
-        assert hasattr(self, 'control'), "Define the control variable first!"
-        assert hasattr(self, 'dyn'), "Define the system dynamics first!"
-        assert hasattr(
-            self, 'path_cost'), "Define the running cost function first!"
-        assert hasattr(
-            self, 'final_cost'), "Define the final cost function first!"
-
-        if type(ini_state) == numpy.ndarray:
-            ini_state = ini_state.flatten().tolist()
+        if type(initial_state) == numpy.ndarray:
+            initial_state = initial_state.flatten().tolist()
 
         # Start with an empty NLP
-        w = []
-        w0 = []
-        lbw = []
-        ubw = []
-        J = 0
-        g = []
-        lbg = []
-        ubg = []
+        traj = []
+        traj0 = []
+        lb_traj = []
+        ub_traj = []
+        Cost = 0
+        constraint = []
+        lb_constraint = []
+        ub_constraint = []
 
         # "Lift" initial conditions
         Xk = MX.sym('X0', self.n_state)
-        w += [Xk]
-        lbw += ini_state
-        ubw += ini_state
-        w0 += ini_state
+        traj += [Xk]
+        lb_traj += initial_state
+        ub_traj += initial_state
+        traj0 += initial_state
 
-        # Formulate the NLP
+        
         for k in range(horizon):
-            # New NLP variable for the control
             Uk = MX.sym('U_' + str(k), self.n_control)
-            w += [Uk]
-            lbw += self.control_lb
-            ubw += self.control_ub
-            w0 += [0.5 * (x + y)
-                   for x, y in zip(self.control_lb, self.control_ub)]
+            traj += [Uk]
+            lb_traj += self.control_lb
+            ub_traj += self.control_ub
+            traj0 += [0.5 * (x + y) for x, y in zip(self.control_lb, self.control_ub)]
 
-            # Integrate till the end of the interval
-            Xnext = self.dyn_fn(Xk, Uk, auxvar_value)
-            Ck = self.path_cost_fn(Xk, Uk, auxvar_value)
-            J = J + Ck
+            Xnext = self.dyn_fn(Xk, Uk, weights_value)
+            Ck = self.stage_cost_fn(Xk, Uk, weights_value)
+            Cost = Cost + Ck
 
-            # New NLP variable for state at end of interval
             Xk = MX.sym('X_' + str(k + 1), self.n_state)
-            w += [Xk]
-            lbw += self.state_lb
-            ubw += self.state_ub
-            w0 += [0.5 * (x + y) for x, y in zip(self.state_lb, self.state_ub)]
+            traj += [Xk]
+            lb_traj += self.state_lb
+            ub_traj += self.state_ub
+            traj0 += [0.5 * (x + y) for x, y in zip(self.state_lb, self.state_ub)]
 
             # Add equality constraint
-            g += [Xnext - Xk]
-            lbg += self.n_state * [0]
-            ubg += self.n_state * [0]
+            constraint += [Xnext - Xk]
+            lb_constraint += self.n_state * [0]
+            ub_constraint += self.n_state * [0]
 
         # Adding the final cost
-        J = J + self.final_cost_fn(Xk, auxvar_value)
+        Cost = Cost + self.terminal_cost_fn(Xk, weights_value)
 
-        # Create an NLP solver and solve it
-        opts = {'ipopt.print_level': print_level,
-                'ipopt.sb': 'yes', 'print_time': print_level}
-        prob = {'f': J, 'x': vertcat(*w), 'g': vertcat(*g)}
+        # USing IPOPT to solve for trajectories based on quadratic cost structure
+        opts = {'ipopt.print_level': print_level, 'ipopt.sb': 'yes', 'print_time': print_level}
+        prob = {'f': Cost, 'x': vertcat(*traj), 'g': vertcat(*constraint)}
         solver = nlpsol('solver', 'ipopt', prob, opts)
         # Solve the NLP
-        sol = solver(x0=w0, lbx=lbw, ubx=ubw, lbg=lbg, ubg=ubg)
-        w_opt = sol['x'].full().flatten()
+        sol = solver(x0=traj0, lbx=lb_traj, ubx=ub_traj, lbg=lb_constraint, ubg=ub_constraint)
+        traj_opt = sol['x'].full().flatten()
 
         # take the optimal control and state
-        sol_traj = numpy.concatenate((w_opt, self.n_control * [0]))
+        sol_traj = numpy.concatenate((traj_opt, self.n_control * [0]))
         sol_traj = numpy.reshape(sol_traj, (-1, self.n_state + self.n_control))
-        state_traj_opt = sol_traj[:, 0:self.n_state]
-        control_traj_opt = numpy.delete(sol_traj[:, self.n_state:], -1, 0)
+        state_trajectories = sol_traj[:, 0:self.n_state]
+        control_trajectories = numpy.delete(sol_traj[:, self.n_state:], -1, 0)
         time = numpy.array([k for k in range(horizon + 1)])
-
-        # Compute the costates using two options
-        if costate_option == 0:
-            # Default option, which directly obtains the costates from the NLP solver
-            costate_traj_opt = numpy.reshape(
-                sol['lam_g'].full().flatten(), (-1, self.n_state))
-        else:
-            # Another option, which solve the costates by the Pontryagin's Maximum Principle
-            # The variable name is consistent with the notations used in the PDP paper
-            dfx_fun = casadi.Function('dfx', [self.state, self.control, self.auxvar], [
-                                      jacobian(self.dyn, self.state)])
-            dhx_fun = casadi.Function('dhx', [self.state, self.auxvar], [
-                                      jacobian(self.final_cost, self.state)])
-            dcx_fun = casadi.Function('dcx', [self.state, self.control, self.auxvar],
-                                      [jacobian(self.path_cost, self.state)])
-            costate_traj_opt = numpy.zeros((horizon, self.n_state))
-            costate_traj_opt[-1,
-                             :] = dhx_fun(state_traj_opt[-1, :], auxvar_value)
-            for k in range(horizon - 1, 0, -1):
-                costate_traj_opt[k - 1, :] = dcx_fun(state_traj_opt[k, :], control_traj_opt[k, :],
-                                                     auxvar_value).full() + numpy.dot(
-                    numpy.transpose(
-                        dfx_fun(state_traj_opt[k, :], control_traj_opt[k, :], auxvar_value).full()),
-                    costate_traj_opt[k, :])
+        
+        # Solving using IPOPT
+        costate_trajectories = numpy.reshape(sol['lam_g'].full().flatten(), (-1, self.n_state))
 
         # output
-        opt_sol = {"state_traj_opt": state_traj_opt,
-                   "control_traj_opt": control_traj_opt,
-                   "costate_traj_opt": costate_traj_opt,
-                   'auxvar_value': auxvar_value,
+        opt_sol = {"state_trajectories": state_trajectories,
+                   "control_trajectories": control_trajectories,
+                   "costate_trajectories": costate_trajectories,
+                   'weights_value': weights_value,
                    "time": time,
                    "horizon": horizon,
                    "cost": sol['f'].full()}
 
         return opt_sol
 
-    def diffPMP(self):
-        assert hasattr(self, 'state'), "Define the state variable first!"
-        assert hasattr(self, 'control'), "Define the control variable first!"
-        assert hasattr(self, 'dyn'), "Define the system dynamics first!"
-        assert hasattr(
-            self, 'path_cost'), "Define the running cost/reward function first!"
-        assert hasattr(
-            self, 'final_cost'), "Define the final cost/reward function first!"
+    # adapted from https://github.com/wanxinjin/Pontryagin-Differentiable-Programming/blob/master/PDP/PDP.py
+    def differential_PMP(self):
+        # assert hasattr(self, 'state'), "Define the state variable first!"
+        # assert hasattr(self, 'control'), "Define the control variable first!"
+        # assert hasattr(self, 'dyn'), "Define the system dynamics first!"
+        # assert hasattr(self, 'stage_cost'), "Define the running cost/reward function first!"
+        # assert hasattr(self, 'terminal_cost'), "Define the final cost/reward function first!"
 
         # Define the Hamiltonian function
         self.costate = casadi.SX.sym('lambda', self.state.numel())
-        self.path_Hamil = self.path_cost + \
-            dot(self.dyn, self.costate)  # path Hamiltonian
-        self.final_Hamil = self.final_cost  # final Hamiltonian
+        self.stage_Hamiltonian = self.stage_cost + dot(self.dyn, self.costate)  # path Hamiltonian
+        self.terminal_Hamiltonian = self.terminal_cost  # final Hamiltonian
 
         # Differentiating dynamics; notations here are consistent with the PDP paper
         self.dfx = jacobian(self.dyn, self.state)
-        self.dfx_fn = casadi.Function(
-            'dfx', [self.state, self.control, self.auxvar], [self.dfx])
+        self.dfx_fn = casadi.Function('dfx', [self.state, self.control, self.weights], [self.dfx])
         self.dfu = jacobian(self.dyn, self.control)
-        self.dfu_fn = casadi.Function(
-            'dfu', [self.state, self.control, self.auxvar], [self.dfu])
-        self.dfe = jacobian(self.dyn, self.auxvar)
-        self.dfe_fn = casadi.Function(
-            'dfe', [self.state, self.control, self.auxvar], [self.dfe])
+        self.dfu_fn = casadi.Function('dfu', [self.state, self.control, self.weights], [self.dfu])
+        self.dfe = jacobian(self.dyn, self.weights)
+        self.dfe_fn = casadi.Function('dfe', [self.state, self.control, self.weights], [self.dfe])
 
         # First-order derivative of path Hamiltonian
-        self.dHx = jacobian(self.path_Hamil, self.state).T
-        self.dHx_fn = casadi.Function(
-            'dHx', [self.state, self.control, self.costate, self.auxvar], [self.dHx])
-        self.dHu = jacobian(self.path_Hamil, self.control).T
-        self.dHu_fn = casadi.Function(
-            'dHu', [self.state, self.control, self.costate, self.auxvar], [self.dHu])
+        self.dHx = jacobian(self.stage_Hamiltonian, self.state).T
+        self.dHx_fn = casadi.Function('dHx', [self.state, self.control, self.costate, self.weights], [self.dHx])
+        self.dHu = jacobian(self.stage_Hamiltonian, self.control).T
+        self.dHu_fn = casadi.Function('dHu', [self.state, self.control, self.costate, self.weights], [self.dHu])
 
         # Second-order derivative of path Hamiltonian
         self.ddHxx = jacobian(self.dHx, self.state)
-        self.ddHxx_fn = casadi.Function(
-            'ddHxx', [self.state, self.control, self.costate, self.auxvar], [self.ddHxx])
+        self.ddHxx_fn = casadi.Function('ddHxx', [self.state, self.control, self.costate, self.weights], [self.ddHxx])
         self.ddHxu = jacobian(self.dHx, self.control)
-        self.ddHxu_fn = casadi.Function(
-            'ddHxu', [self.state, self.control, self.costate, self.auxvar], [self.ddHxu])
-        self.ddHxe = jacobian(self.dHx, self.auxvar)
-        self.ddHxe_fn = casadi.Function(
-            'ddHxe', [self.state, self.control, self.costate, self.auxvar], [self.ddHxe])
+        self.ddHxu_fn = casadi.Function('ddHxu', [self.state, self.control, self.costate, self.weights], [self.ddHxu])
+        self.ddHxe = jacobian(self.dHx, self.weights)
+        self.ddHxe_fn = casadi.Function('ddHxe', [self.state, self.control, self.costate, self.weights], [self.ddHxe])
         self.ddHux = jacobian(self.dHu, self.state)
-        self.ddHux_fn = casadi.Function(
-            'ddHux', [self.state, self.control, self.costate, self.auxvar], [self.ddHux])
+        self.ddHux_fn = casadi.Function('ddHux', [self.state, self.control, self.costate, self.weights], [self.ddHux])
         self.ddHuu = jacobian(self.dHu, self.control)
-        self.ddHuu_fn = casadi.Function(
-            'ddHuu', [self.state, self.control, self.costate, self.auxvar], [self.ddHuu])
-        self.ddHue = jacobian(self.dHu, self.auxvar)
-        self.ddHue_fn = casadi.Function(
-            'ddHue', [self.state, self.control, self.costate, self.auxvar], [self.ddHue])
+        self.ddHuu_fn = casadi.Function('ddHuu', [self.state, self.control, self.costate, self.weights], [self.ddHuu])
+        self.ddHue = jacobian(self.dHu, self.weights)
+        self.ddHue_fn = casadi.Function('ddHue', [self.state, self.control, self.costate, self.weights], [self.ddHue])
 
         # First-order derivative of final Hamiltonian
-        self.dhx = jacobian(self.final_Hamil, self.state).T
-        self.dhx_fn = casadi.Function(
-            'dhx', [self.state, self.auxvar], [self.dhx])
+        self.dhx = jacobian(self.terminal_Hamiltonian, self.state).T
+        self.dhx_fn = casadi.Function('dhx', [self.state, self.weights], [self.dhx])
 
         # second order differential of path Hamiltonian
         self.ddhxx = jacobian(self.dhx, self.state)
-        self.ddhxx_fn = casadi.Function(
-            'ddhxx', [self.state, self.auxvar], [self.ddhxx])
-        self.ddhxe = jacobian(self.dhx, self.auxvar)
-        self.ddhxe_fn = casadi.Function(
-            'ddhxe', [self.state, self.auxvar], [self.ddhxe])
+        self.ddhxx_fn = casadi.Function('ddhxx', [self.state, self.weights], [self.ddhxx])
+        self.ddhxe = jacobian(self.dhx, self.weights)
+        self.ddhxe_fn = casadi.Function('ddhxe', [self.state, self.weights], [self.ddhxe])
 
-    def getAuxSys(self, state_traj_opt, control_traj_opt, costate_traj_opt, auxvar_value=1):
+    def getAuxSys(self, state_trajectories, control_trajectories, costate_trajectories, weights_value=1):
         statement = [hasattr(self, 'dfx_fn'), hasattr(self, 'dfu_fn'), hasattr(self, 'dfe_fn'),
-                     hasattr(self, 'ddHxx_fn'),
-                     hasattr(self, 'ddHxu_fn'), hasattr(
-                         self, 'ddHxe_fn'), hasattr(self, 'ddHux_fn'),
-                     hasattr(self, 'ddHuu_fn'),
+                     hasattr(self, 'ddHxx_fn'), \
+                     hasattr(self, 'ddHxu_fn'), hasattr(self, 'ddHxe_fn'), hasattr(self, 'ddHux_fn'),
+                     hasattr(self, 'ddHuu_fn'), \
                      hasattr(self, 'ddHue_fn'), hasattr(self, 'ddhxx_fn'), hasattr(self, 'ddhxe_fn'), ]
         if not all(statement):
-            self.diffPMP()
+            self.differential_PMP()
 
         # Initialize the coefficient matrices of the auxiliary control system: note that all the notations used here are
         # consistent with the notations defined in the PDP paper.
         dynF, dynG, dynE = [], [], []
-        matHxx, matHxu, matHxe, matHux, matHuu, matHue, mathxx, mathxe = [
-        ], [], [], [], [], [], [], []
+        matHxx, matHxu, matHxe, matHux, matHuu, matHue, mathxx, mathxe = [], [], [], [], [], [], [], []
 
         # Solve the above coefficient matrices
-        for t in range(numpy.size(control_traj_opt, 0)):
-            curr_x = state_traj_opt[t, :]
-            curr_u = control_traj_opt[t, :]
-            next_lambda = costate_traj_opt[t, :]
-            dynF += [self.dfx_fn(curr_x, curr_u, auxvar_value).full()]
-            dynG += [self.dfu_fn(curr_x, curr_u, auxvar_value).full()]
-            dynE += [self.dfe_fn(curr_x, curr_u, auxvar_value).full()]
-            matHxx += [self.ddHxx_fn(curr_x, curr_u,
-                                     next_lambda, auxvar_value).full()]
-            matHxu += [self.ddHxu_fn(curr_x, curr_u,
-                                     next_lambda, auxvar_value).full()]
-            matHxe += [self.ddHxe_fn(curr_x, curr_u,
-                                     next_lambda, auxvar_value).full()]
-            matHux += [self.ddHux_fn(curr_x, curr_u,
-                                     next_lambda, auxvar_value).full()]
-            matHuu += [self.ddHuu_fn(curr_x, curr_u,
-                                     next_lambda, auxvar_value).full()]
-            matHue += [self.ddHue_fn(curr_x, curr_u,
-                                     next_lambda, auxvar_value).full()]
-        mathxx = [self.ddhxx_fn(state_traj_opt[-1, :], auxvar_value).full()]
-        mathxe = [self.ddhxe_fn(state_traj_opt[-1, :], auxvar_value).full()]
+        for t in range(numpy.size(control_trajectories, 0)):
+            curr_x = state_trajectories[t, :]
+            curr_u = control_trajectories[t, :]
+            next_lambda = costate_trajectories[t, :]
+            dynF += [self.dfx_fn(curr_x, curr_u, weights_value).full()]
+            dynG += [self.dfu_fn(curr_x, curr_u, weights_value).full()]
+            dynE += [self.dfe_fn(curr_x, curr_u, weights_value).full()]
+            matHxx += [self.ddHxx_fn(curr_x, curr_u, next_lambda, weights_value).full()]
+            matHxu += [self.ddHxu_fn(curr_x, curr_u, next_lambda, weights_value).full()]
+            matHxe += [self.ddHxe_fn(curr_x, curr_u, next_lambda, weights_value).full()]
+            matHux += [self.ddHux_fn(curr_x, curr_u, next_lambda, weights_value).full()]
+            matHuu += [self.ddHuu_fn(curr_x, curr_u, next_lambda, weights_value).full()]
+            matHue += [self.ddHue_fn(curr_x, curr_u, next_lambda, weights_value).full()]
+        mathxx = [self.ddhxx_fn(state_trajectories[-1, :], weights_value).full()]
+        mathxe = [self.ddhxe_fn(state_trajectories[-1, :], weights_value).full()]
 
         auxSys = {"dynF": dynF,
                   "dynG": dynG,
@@ -299,7 +203,7 @@ class OCSys:
                   "hxe": mathxe}
         return auxSys
 
-
+ # adapted from https://github.com/wanxinjin/Pontryagin-Differentiable-Programming/blob/master/PDP/PDP.py
 class LQR:
 
     def __init__(self, project_name="LQR system"):
@@ -337,7 +241,7 @@ class LQR:
             self.dynE = None
             self.n_batch = None
 
-    def setPathCost(self, Hxx, Huu, Hxu=None, Hux=None, Hxe=None, Hue=None):
+    def initialize_stage_cost(self, Hxx, Huu, Hxu=None, Hux=None, Hxe=None, Hue=None):
 
         if type(Hxx) is numpy.ndarray:
             self.Hxx = [Hxx]
@@ -393,7 +297,7 @@ class LQR:
         else:
             self.Hue = None
 
-    def setFinalCost(self, hxx, hxe=None):
+    def initialize_terminal_cost(self, hxx, hxe=None):
 
         if type(hxx) is numpy.ndarray:
             self.hxx = [hxx]
@@ -412,19 +316,19 @@ class LQR:
         else:
             self.hxe = None
 
-    def lqrSolver(self, ini_state, horizon):
+    def lqrSolver(self, initial_state, horizon):
 
         # Data pre-processing
         n_state = numpy.size(self.dynF[0], 1)
-        if type(ini_state) is list:
-            self.ini_x = numpy.array(ini_state, numpy.float64)
+        if type(initial_state) is list:
+            self.ini_x = numpy.array(initial_state, numpy.float64)
             if self.ini_x.ndim == 2:
                 self.n_batch = numpy.size(self.ini_x, 1)
             else:
                 self.n_batch = 1
                 self.ini_x = self.ini_x.reshape(n_state, -1)
-        elif type(ini_state) is numpy.ndarray:
-            self.ini_x = ini_state
+        elif type(initial_state) is numpy.ndarray:
+            self.ini_x = initial_state
             if self.ini_x.ndim == 2:
                 self.n_batch = numpy.size(self.ini_x, 1)
             else:
@@ -541,24 +445,19 @@ class LQR:
             Q_t = Hxx[t] - numpy.matmul(HxuinvHuu, numpy.transpose(Hxu[t]))
             N_t = Hxe[t] - numpy.matmul(HxuinvHuu, Hue[t])
 
-            temp_mat = numpy.matmul(numpy.transpose(
-                A_t), numpy.linalg.inv(I + numpy.matmul(P_next, R_t)))
+            temp_mat = numpy.matmul(numpy.transpose(A_t), numpy.linalg.inv(I + numpy.matmul(P_next, R_t)))
             P_curr = Q_t + numpy.matmul(temp_mat, numpy.matmul(P_next, A_t))
-            W_curr = N_t + numpy.matmul(temp_mat,
-                                        W_next + numpy.matmul(P_next, M_t))
+            W_curr = N_t + numpy.matmul(temp_mat, W_next + numpy.matmul(P_next, M_t))
 
             PP[t - 1] = P_curr
             WW[t - 1] = W_curr
 
         # Compute the trajectory using the Raccti matrices obtained from the above: the notations used here are
         # consistent with the PDP paper in Lemma 4.2
-        state_traj_opt = (self.horizon + 1) * \
-            [numpy.zeros((self.n_state, self.n_batch))]
-        control_traj_opt = (self.horizon) * \
-            [numpy.zeros((self.n_control, self.n_batch))]
-        costate_traj_opt = (self.horizon) * \
-            [numpy.zeros((self.n_state, self.n_batch))]
-        state_traj_opt[0] = self.ini_x
+        state_trajectories = (self.horizon + 1) * [numpy.zeros((self.n_state, self.n_batch))]
+        control_trajectories = (self.horizon) * [numpy.zeros((self.n_control, self.n_batch))]
+        costate_trajectories = (self.horizon) * [numpy.zeros((self.n_state, self.n_batch))]
+        state_trajectories[0] = self.ini_x
         for t in range(self.horizon):
             P_next = PP[t]
             W_next = WW[t]
@@ -568,7 +467,7 @@ class LQR:
             M_t = E[t] - numpy.matmul(GinvHuu, Hue[t])
             R_t = numpy.matmul(GinvHuu, numpy.transpose(G[t]))
 
-            x_t = state_traj_opt[t]
+            x_t = state_trajectories[t]
             u_t = -numpy.matmul(invHuu, numpy.matmul(numpy.transpose(Hxu[t]), x_t) + Hue[t]) \
                   - numpy.linalg.multi_dot([invHuu, numpy.transpose(G[t]), numpy.linalg.inv(I + numpy.dot(P_next, R_t)),
                                             (numpy.matmul(numpy.matmul(P_next, A_t), x_t) + numpy.matmul(P_next,
@@ -577,13 +476,15 @@ class LQR:
             x_next = numpy.matmul(F[t], x_t) + numpy.matmul(G[t], u_t) + E[t]
             lambda_next = numpy.matmul(P_next, x_next) + W_next
 
-            state_traj_opt[t + 1] = x_next
-            control_traj_opt[t] = u_t
-            costate_traj_opt[t] = lambda_next
+            state_trajectories[t + 1] = x_next
+            control_trajectories[t] = u_t
+            costate_trajectories[t] = lambda_next
         time = [k for k in range(self.horizon + 1)]
 
-        opt_sol = {'state_traj_opt': state_traj_opt,
-                   'control_traj_opt': control_traj_opt,
-                   'costate_traj_opt': costate_traj_opt,
+        opt_sol = {'state_trajectories': state_trajectories,
+                   'control_trajectories': control_trajectories,
+                   'costate_trajectories': costate_trajectories,
                    'time': time}
         return opt_sol
+
+
