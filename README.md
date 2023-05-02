@@ -60,3 +60,7 @@ python -m venv .PDPvenv
 .PDPvenv/Scripts/Activate
 pip install -r requiments.txt
 ```
+
+## Tested on
+- Ubuntu and Windows PC
+- Python 3.9.13
