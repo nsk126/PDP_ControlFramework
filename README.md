@@ -64,3 +64,4 @@ pip install -r requiments.txt
 ## Tested on
 - Ubuntu and Windows PC
 - Python 3.9.13
+- Python 3.10.9
